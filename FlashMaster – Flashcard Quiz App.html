@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FlashMaster – Flashcard Quiz App</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>tailwind.config = { darkMode: 'class' };</script>
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); color-scheme: light; }
+  :root.dark { color-scheme: dark; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #0f172a; }
+  .dark body { background: #0f172a; color: #e2e8f0; }
+  .flip { perspective: 1200px; }
+  .flip-in { position: relative; width: 100%; height: 100%; transition: transform .6s cubic-bezier(.4,.2,.2,1); transform-style: preserve-3d; }
+  .flip.flipped .flip-in { transform: rotateY(180deg); }
+  .face { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+  .back { transform: rotateY(180deg); }
+  .fade { animation: fade .3s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="fixed left-1/2 -translate-x-1/2 bottom-24 sm:bottom-6 z-50 px-4 py-2 rounded-xl text-white text-sm shadow-lg transition-all duration-300 opacity-0 pointer-events-none"></div>
+
+<script>
+// ---------- Data & storage ----------
+const CATS = ['Programming', 'Science', 'Mathematics', 'General Knowledge'];
+const SAMPLE = [
+  ['Programming','What does HTML stand for?','HyperText Markup Language'],
+  ['Programming','Which keyword declares a block-scoped variable in JavaScript?','let (or const)'],
+  ['Programming','What does CSS stand for?','Cascading Style Sheets'],
+  ['Programming','What is the time complexity of binary search?','O(log n)'],
+  ['Science','What is the chemical symbol for water?','H2O'],
+  ['Science','Which planet is known as the Red Planet?','Mars'],
+  ['Science','What gas do plants absorb during photosynthesis?','Carbon dioxide (CO2)'],
+  ['Science','What is the powerhouse of the cell?','The mitochondria'],
+  ['Mathematics','What is the value of π to two decimal places?','3.14'],
+  ['Mathematics','What is the square root of 144?','12'],
+  ['Mathematics','What is the sum of angles in a triangle?','180 degrees'],
+  ['General Knowledge','What is the capital of Japan?','Tokyo'],
+  ['General Knowledge','Who painted the Mona Lisa?','Leonardo da Vinci'],
+  ['General Knowledge','How many continents are there?','Seven']
+];
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+};
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const shuffle = a => { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const S = {
+  cards: store.get('fm_cards', null) || SAMPLE.map(([cat, q, a]) => ({ id: uid(), cat, q, a })),
+  studied: store.get('fm_studied', []),
+  correct: store.get('fm_correct', []),
+  quiz: store.get('fm_quiz', null),
+  best: store.get('fm_best', 0),
+  dark: store.get('fm_dark', window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches),
+  page: 'home', cat: 'All', qcat: 'All', idx: 0, flipped: false, q: '', editId: null, del: null, errors: {}
+};
+function save() {
+  store.set('fm_cards', S.cards); store.set('fm_studied', S.studied); store.set('fm_correct', S.correct);
+  store.set('fm_quiz', S.quiz); store.set('fm_best', S.best); store.set('fm_dark', S.dark);
+}
+function applyTheme() { document.documentElement.classList.toggle('dark', S.dark); }
+
+// ---------- UI helpers ----------
+const SURF = 'bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700';
+const BTN = 'px-4 py-2 rounded-xl font-medium transition disabled:opacity-40 disabled:cursor-not-allowed ';
+const PRIMARY = BTN + 'bg-indigo-600 text-white hover:bg-indigo-700 ';
+const GHOST = BTN + 'bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 ';
+const INPUT = 'w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 ';
+const CATCOL = { Programming: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300', Science: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300', Mathematics: 'bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300', 'General Knowledge': 'bg-pink-100 text-pink-700 dark:bg-pink-900/50 dark:text-pink-300' };
+const badge = c => `<span class="inline-block text-xs font-semibold px-2.5 py-1 rounded-full ${CATCOL[c] || ''}">${esc(c)}</span>`;
+let toastT;
+function toast(msg, type = 'ok') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `fixed left-1/2 -translate-x-1/2 bottom-24 sm:bottom-6 z-50 px-4 py-2 rounded-xl text-white text-sm shadow-lg transition-all duration-300 pointer-events-none ${type === 'ok' ? 'bg-emerald-600' : 'bg-rose-600'} opacity-100`;
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.replace('opacity-100', 'opacity-0'), 2600);
+}
+const empty = (icon, title, text, btn = '') => `<div class="${SURF} p-10 text-center fade"><div class="text-5xl mb-3">${icon}</div><h3 class="text-lg font-semibold">${title}</h3><p class="text-slate-500 dark:text-slate-400 mt-1 mb-4">${text}</p>${btn}</div>`;
+const addBtn = `<button data-a="go" data-p="add" class="${PRIMARY}">＋ Add New Flashcard</button>`;
+
+// ---------- Derived ----------
+const ids = () => new Set(S.cards.map(c => c.id));
+const studiedN = () => S.studied.filter(i => ids().has(i)).length;
+const correctN = () => S.correct.filter(i => ids().has(i)).length;
+function filtered() {
+  const q = S.q.trim().toLowerCase();
+  return S.cards.filter(c => (S.cat === 'All' || c.cat === S.cat) && (!q || c.q.toLowerCase().includes(q) || c.cat.toLowerCase().includes(q)));
+}
+const mark = (arr, id) => { if (!S[arr].includes(id)) S[arr].push(id); };
+
+// ---------- Layout ----------
+const NAV = [['home', '🏠', 'Dashboard'], ['cards', '🗂️', 'Flashcards'], ['quiz', '🎯', 'Quiz'], ['add', '➕', 'Add'], ['settings', '⚙️', 'Settings']];
+function layout(body) {
+  const active = 'bg-indigo-600 text-white';
+  const top = NAV.map(([p, i, l]) => `<button data-a="go" data-p="${p}" class="px-3 py-2 rounded-xl text-sm font-medium transition ${S.page === p ? active : 'hover:bg-slate-100 dark:hover:bg-slate-800'}">${i} ${l}</button>`).join('');
+  const bottom = NAV.map(([p, i, l]) => `<button data-a="go" data-p="${p}" class="flex-1 py-2 flex flex-col items-center text-xs ${S.page === p ? 'text-indigo-600 dark:text-indigo-400 font-semibold' : 'text-slate-500'}"><span class="text-lg">${i}</span>${l}</button>`).join('');
+  return `
+  <header class="sticky top-0 z-30 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800">
+    <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+      <div class="text-xl font-extrabold tracking-tight">⚡ Flash<span class="text-indigo-600">Master</span></div>
+      <nav class="hidden sm:flex gap-1">${top}</nav>
+      <button data-a="theme" class="${GHOST} !px-3" aria-label="Toggle theme">${S.dark ? '☀️' : '🌙'}</button>
+    </div>
+  </header>
+  <main class="max-w-5xl mx-auto px-4 py-6 pb-28 sm:pb-10 fade">${body}</main>
+  <nav class="sm:hidden fixed bottom-0 inset-x-0 z-30 flex bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800" style="padding-bottom:env(safe-area-inset-bottom,0px)">${bottom}</nav>
+  ${S.del ? modal() : ''}`;
+}
+function modal() {
+  return `<div class="fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4"><div class="${SURF} p-6 max-w-sm w-full fade">
+  <h3 class="text-lg font-semibold mb-2">Delete this flashcard?</h3><p class="text-slate-500 dark:text-slate-400 mb-5">This will permanently remove it. This can’t be undone.</p>
+  <div class="flex justify-end gap-2"><button data-a="delno" class="${GHOST}">Cancel</button><button data-a="delok" class="${BTN} bg-rose-600 text-white hover:bg-rose-700">Delete</button></div></div></div>`;
+}
+
+// ---------- Pages ----------
+function home() {
+  const t = S.cards.length, st = studiedN(), co = correctN();
+  const tile = (l, v, c) => `<div class="${SURF} p-5"><div class="text-sm text-slate-500 dark:text-slate-400">${l}</div><div class="text-3xl font-bold mt-1 ${c}">${v}</div></div>`;
+  const res = S.q.trim() ? filtered() : [];
+  return `
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+    <div><h1 class="text-2xl font-bold">Dashboard</h1><p class="text-slate-500 dark:text-slate-400">Best quiz score: ${S.best}%</p></div>${addBtn}
+  </div>
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${tile('Total flashcards', t, '')}${tile('Cards studied', st, 'text-indigo-600 dark:text-indigo-400')}
+    ${tile('Correct answers', co, 'text-emerald-600 dark:text-emerald-400')}${tile('Remaining', Math.max(0, t - st), 'text-amber-600 dark:text-amber-400')}
+  </div>
+  <div class="${SURF} p-5">
+    <input id="q" value="${esc(S.q)}" placeholder="🔍 Search by question or category…" class="${INPUT}">
+    ${S.q.trim() ? `<div class="mt-4 space-y-2">${res.length ? res.map(c => `<button data-a="open" data-id="${c.id}" class="w-full text-left p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 flex items-center justify-between gap-3"><span>${esc(c.q)}</span>${badge(c.cat)}</button>`).join('') : '<p class="text-slate-500 text-center py-4">No flashcards match your search.</p>'}</div>` : '<p class="text-sm text-slate-500 dark:text-slate-400 mt-3">Type to find a flashcard, then click it to study.</p>'}
+  </div>`;
+}
+
+function cards() {
+  if (!S.cards.length) return empty('📭', 'No flashcards yet', 'Create your first flashcard to start studying.', addBtn);
+  const f = filtered();
+  if (S.idx >= f.length) S.idx = Math.max(0, f.length - 1);
+  const chips = ['All', ...CATS].map(c => `<button data-a="cat" data-c="${c}" class="px-3 py-1.5 rounded-full text-sm font-medium transition ${S.cat === c ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700'}">${c}</button>`).join('');
+  let study;
+  if (!f.length) study = empty('🔎', 'No matching cards', 'Try a different category or search term.');
+  else {
+    const c = f[S.idx];
+    study = `
+    <div class="text-center text-sm text-slate-500 dark:text-slate-400 mb-2">Card ${S.idx + 1} of ${f.length}</div>
+    <div id="card" data-a="flip" class="flip h-64 sm:h-72 cursor-pointer ${S.flipped ? 'flipped' : ''}"><div class="flip-in">
+      <div class="face ${SURF} p-6 flex flex-col items-center justify-center text-center gap-4">${badge(c.cat)}<div class="text-xl sm:text-2xl font-semibold">${esc(c.q)}</div><div class="text-xs text-slate-400">Click to flip</div></div>
+      <div class="face back rounded-2xl shadow-sm bg-indigo-600 text-white p-6 flex flex-col items-center justify-center text-center gap-4"><div class="text-xs uppercase tracking-wider opacity-80">Answer</div><div class="text-xl sm:text-2xl font-semibold">${esc(c.a)}</div></div>
+    </div></div>
+    <div class="flex flex-wrap justify-center gap-2 mt-5">
+      <button data-a="prev" class="${GHOST}" ${S.idx === 0 ? 'disabled' : ''}>← Previous</button>
+      <button id="flipBtn" data-a="flip" class="${PRIMARY}">${S.flipped ? 'Hide answer' : 'Show answer'}</button>
+      <button data-a="next" class="${GHOST}" ${S.idx >= f.length - 1 ? 'disabled' : ''}>Next →</button>
+    </div>
+    <div class="text-center mt-3"><button data-a="know" data-id="${c.id}" class="text-sm text-emerald-600 dark:text-emerald-400 hover:underline">${S.correct.includes(c.id) ? '✓ Marked as known' : 'Mark as known ✓'}</button></div>`;
+  }
+  const list = f.map(c => `<div class="${SURF} p-4 flex items-center justify-between gap-3"><div class="min-w-0"><div class="truncate font-medium">${esc(c.q)}</div><div class="truncate text-sm text-slate-500 dark:text-slate-400">${esc(c.a)}</div></div>
+    <div class="flex items-center gap-2 shrink-0">${badge(c.cat)}<button data-a="edit" data-id="${c.id}" class="${GHOST} !px-3 !py-1.5 text-sm" aria-label="Edit">✏️</button><button data-a="del" data-id="${c.id}" class="${GHOST} !px-3 !py-1.5 text-sm" aria-label="Delete">🗑️</button></div></div>`).join('');
+  return `
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><h1 class="text-2xl font-bold">My Flashcards</h1>${addBtn}</div>
+  <input id="q" value="${esc(S.q)}" placeholder="🔍 Search flashcards…" class="${INPUT} mb-3">
+  <div class="flex flex-wrap gap-2 mb-6">${chips}</div>
+  <div class="max-w-2xl mx-auto mb-8">${study}</div>
+  ${f.length ? `<h2 class="font-semibold mb-3">Manage cards (${f.length})</h2><div class="space-y-2">${list}</div>` : ''}`;
+}
+
+function quiz() {
+  const Q = S.quiz;
+  if (!Q) {
+    const n = S.cards.filter(c => S.qcat === 'All' || c.cat === S.qcat).length;
+    return `<h1 class="text-2xl font-bold mb-4">Quiz Mode</h1>
+    <div class="${SURF} p-6 max-w-lg">
+      <p class="text-slate-500 dark:text-slate-400 mb-4">Answer up to 10 multiple-choice questions built from your flashcards.</p>
+      <label class="text-sm font-medium">Category</label>
+      <select id="qcat" class="${INPUT} mb-2 mt-1">${['All', ...CATS].map(c => `<option ${S.qcat === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+      <p class="text-sm text-slate-500 mb-4">${n} card${n === 1 ? '' : 's'} available${n < 2 ? ' – you need at least 2 to start.' : '.'}</p>
+      <button data-a="start" class="${PRIMARY}" ${n < 2 ? 'disabled' : ''}>Start Quiz</button>
+    </div>`;
+  }
+  const n = Q.ids.length;
+  if (Q.done) {
+    const pct = Math.round(Q.score / n * 100);
+    return `<div class="${SURF} p-8 max-w-lg mx-auto text-center fade"><div class="text-5xl mb-3">${pct >= 80 ? '🏆' : pct >= 50 ? '👍' : '📚'}</div>
+      <h2 class="text-2xl font-bold">Quiz complete!</h2><div class="text-5xl font-extrabold text-indigo-600 dark:text-indigo-400 my-4">${Q.score}/${n}</div>
+      <p class="text-slate-500 dark:text-slate-400 mb-6">${pct}% – ${pct >= 80 ? 'Excellent work!' : pct >= 50 ? 'Good job, keep practicing!' : 'Keep studying, you’ll get there!'}</p>
+      <div class="flex justify-center gap-2"><button data-a="restart" class="${PRIMARY}">Restart Quiz</button><button data-a="newquiz" class="${GHOST}">Change category</button></div></div>`;
+  }
+  const c = S.cards.find(x => x.id === Q.ids[Q.idx]), opts = Q.opts[Q.idx], answered = Q.pick !== null;
+  const pct = Math.round((Q.idx + (answered ? 1 : 0)) / n * 100);
+  const ob = opts.map((o, i) => {
+    let cls = 'border-slate-200 dark:border-slate-700 hover:border-indigo-400 hover:bg-indigo-50 dark:hover:bg-slate-700';
+    if (answered) cls = o === c.a ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/30' : i === Q.pick ? 'border-rose-500 bg-rose-50 dark:bg-rose-900/30' : 'border-slate-200 dark:border-slate-700 opacity-60';
+    return `<button data-a="pick" data-i="${i}" ${answered ? 'disabled' : ''} class="w-full text-left p-4 rounded-xl border-2 transition flex gap-3 ${cls}"><span class="font-bold text-indigo-600 dark:text-indigo-400">${'ABCD'[i]}</span><span>${esc(o)}</span></button>`;
+  }).join('');
+  const ok = answered && opts[Q.pick] === c.a;
+  return `<div class="max-w-2xl mx-auto">
+    <div class="flex justify-between text-sm mb-2"><span>Question ${Q.idx + 1} of ${n}</span><span class="font-semibold">Score: ${Q.score}</span></div>
+    <div class="h-2.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden mb-6"><div class="h-full bg-indigo-600 transition-all duration-500" style="width:${pct}%"></div></div>
+    <div class="${SURF} p-6 fade">${badge(c.cat)}<h2 class="text-xl font-semibold mt-3 mb-5">${esc(c.q)}</h2><div class="space-y-3">${ob}</div>
+    ${answered ? `<div class="mt-5 flex items-center justify-between gap-3"><p class="font-semibold ${ok ? 'text-emerald-600' : 'text-rose-600'}">${ok ? '✓ Correct!' : '✗ Incorrect – the answer is: ' + esc(c.a)}</p><button data-a="qnext" class="${PRIMARY}">${Q.idx + 1 >= n ? 'Finish' : 'Next'} →</button></div>` : ''}</div>
+    <div class="text-center mt-4"><button data-a="newquiz" class="text-sm text-slate-500 hover:underline">Quit quiz</button></div></div>`;
+}
+
+function form() {
+  const c = S.editId ? S.cards.find(x => x.id === S.editId) : null, e = S.errors;
+  const err = k => e[k] ? `<p class="text-rose-600 text-sm mt-1">${e[k]}</p>` : '';
+  return `<h1 class="text-2xl font-bold mb-4">${c ? 'Edit Flashcard' : 'Add Flashcard'}</h1>
+  <form id="cardForm" novalidate class="${SURF} p-6 max-w-xl space-y-4">
+    <div><label class="text-sm font-medium">Category</label><select name="cat" class="${INPUT} mt-1">${CATS.map(x => `<option ${c && c.cat === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+    <div><label class="text-sm font-medium">Question</label><textarea name="q" rows="3" class="${INPUT} mt-1 ${e.q ? '!border-rose-500' : ''}" placeholder="Type the question…">${c ? esc(c.q) : ''}</textarea>${err('q')}</div>
+    <div><label class="text-sm font-medium">Answer</label><textarea name="a" rows="3" class="${INPUT} mt-1 ${e.a ? '!border-rose-500' : ''}" placeholder="Type the answer…">${c ? esc(c.a) : ''}</textarea>${err('a')}</div>
+    <div class="flex gap-2"><button type="submit" class="${PRIMARY}">${c ? 'Save Changes' : 'Add Flashcard'}</button>${c ? `<button type="button" data-a="canceledit" class="${GHOST}">Cancel</button>` : ''}</div>
+  </form>`;
+}
+
+function settings() {
+  return `<h1 class="text-2xl font-bold mb-4">Settings</h1><div class="space-y-4 max-w-xl">
+  <div class="${SURF} p-5 flex items-center justify-between"><div><div class="font-semibold">Dark mode</div><div class="text-sm text-slate-500">Switch between light and dark themes.</div></div><button data-a="theme" class="${PRIMARY}">${S.dark ? 'Turn off' : 'Turn on'}</button></div>
+  <div class="${SURF} p-5 flex items-center justify-between gap-3"><div><div class="font-semibold">Reset progress</div><div class="text-sm text-slate-500">Clear studied cards, correct answers, quiz and best score.</div></div><button data-a="resetprog" class="${GHOST}">Reset</button></div>
+  <div class="${SURF} p-5 flex items-center justify-between gap-3"><div><div class="font-semibold">Restore sample cards</div><div class="text-sm text-slate-500">Replace all cards with the starter set.</div></div><button data-a="sample" class="${GHOST}">Restore</button></div>
+  <div class="${SURF} p-5 flex items-center justify-between gap-3"><div><div class="font-semibold text-rose-600">Delete all flashcards</div><div class="text-sm text-slate-500">Removes every card permanently.</div></div><button data-a="clearall" class="${BTN} bg-rose-600 text-white hover:bg-rose-700">Delete all</button></div></div>`;
+}
+
+const PAGES = { home, cards, quiz, add: form, settings };
+function render() {
+  const a = document.activeElement, id = a && a.id, pos = a && a.selectionStart;
+  document.getElementById('app').innerHTML = layout(PAGES[S.page]());
+  if (id) { const el = document.getElementById(id); if (el && el.tagName === 'INPUT') { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) {} } }
+}
+
+// ---------- Actions ----------
+function startQuiz() {
+  const pool = S.cards.filter(c => S.qcat === 'All' || c.cat === S.qcat);
+  if (pool.length < 2) return toast('Add at least 2 cards in this category.', 'err');
+  const pick = shuffle(pool).slice(0, 10);
+  const opts = pick.map(c => shuffle([c.a, ...shuffle([...new Set(S.cards.filter(x => x.a !== c.a).map(x => x.a))]).slice(0, 3)]));
+  S.quiz = { ids: pick.map(c => c.id), opts, idx: 0, score: 0, pick: null, done: false };
+  save(); render();
+}
+function cardsChanged() { S.quiz = null; }
+
+const actions = {
+  go(el) { if (el.dataset.p === 'add') { S.editId = null; S.errors = {}; } S.page = el.dataset.p; S.q = ''; window.scrollTo(0, 0); },
+  theme() { S.dark = !S.dark; applyTheme(); },
+  cat(el) { S.cat = el.dataset.c; S.idx = 0; S.flipped = false; },
+  prev() { S.idx = Math.max(0, S.idx - 1); S.flipped = false; },
+  next() { S.idx++; S.flipped = false; },
+  know(el) { mark('correct', el.dataset.id); mark('studied', el.dataset.id); toast('Marked as known'); },
+  open(el) { S.cat = 'All'; S.q = ''; S.idx = Math.max(0, S.cards.findIndex(c => c.id === el.dataset.id)); S.flipped = false; S.page = 'cards'; },
+  edit(el) { S.editId = el.dataset.id; S.errors = {}; S.page = 'add'; window.scrollTo(0, 0); },
+  canceledit() { S.editId = null; S.page = 'cards'; },
+  del(el) { S.del = el.dataset.id; },
+  delno() { S.del = null; },
+  delok() { S.cards = S.cards.filter(c => c.id !== S.del); S.del = null; cardsChanged(); toast('Flashcard deleted'); },
+  start: startQuiz,
+  pick(el) {
+    const Q = S.quiz; if (Q.pick !== null) return;
+    const c = S.cards.find(x => x.id === Q.ids[Q.idx]); Q.pick = +el.dataset.i;
+    mark('studied', c.id);
+    if (Q.opts[Q.idx][Q.pick] === c.a) { Q.score++; mark('correct', c.id); }
+  },
+  qnext() {
+    const Q = S.quiz; Q.idx++; Q.pick = null;
+    if (Q.idx >= Q.ids.length) { Q.done = true; S.best = Math.max(S.best, Math.round(Q.score / Q.ids.length * 100)); }
+  },
+  restart: startQuiz,
+  newquiz() { S.quiz = null; },
+  resetprog() { S.studied = []; S.correct = []; S.quiz = null; S.best = 0; toast('Progress reset'); },
+  sample() { S.cards = SAMPLE.map(([cat, q, a]) => ({ id: uid(), cat, q, a })); S.studied = []; S.correct = []; S.quiz = null; S.idx = 0; toast('Sample cards restored'); },
+  clearall() { S.cards = []; S.studied = []; S.correct = []; S.quiz = null; toast('All flashcards deleted'); }
+};
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-a]'); if (!el) return;
+  const a = el.dataset.a;
+  if (a === 'flip') { // animate without re-rendering
+    const card = document.getElementById('card'); if (!card) return;
+    S.flipped = !S.flipped; card.classList.toggle('flipped', S.flipped);
+    const b = document.getElementById('flipBtn'); if (b) b.textContent = S.flipped ? 'Hide answer' : 'Show answer';
+    const c = filtered()[S.idx]; if (c && S.flipped) { mark('studied', c.id); save(); }
+    return;
+  }
+  if (actions[a]) { actions[a](el); save(); render(); }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'q') { S.q = e.target.value; S.idx = 0; S.flipped = false; render(); }
+});
+document.addEventListener('change', e => {
+  if (e.target.id === 'qcat') { S.qcat = e.target.value; render(); }
+});
+document.addEventListener('submit', e => {
+  if (e.target.id !== 'cardForm') return;
+  e.preventDefault();
+  const f = new FormData(e.target), q = f.get('q').trim(), a = f.get('a').trim(), cat = f.get('cat');
+  S.errors = {};
+  if (!q) S.errors.q = 'Question cannot be empty.';
+  if (!a) S.errors.a = 'Answer cannot be empty.';
+  if (S.errors.q || S.errors.a) { toast('Please fix the highlighted fields.', 'err'); render(); return; }
+  let newId = S.editId;
+  if (S.editId) { Object.assign(S.cards.find(c => c.id === S.editId), { q, a, cat }); toast('Flashcard updated'); }
+  else { newId = uid(); S.cards.push({ id: newId, cat, q, a }); toast('Flashcard added'); }
+  cardsChanged(); S.editId = null; S.cat = 'All'; S.q = '';
+  S.idx = S.cards.findIndex(c => c.id === newId); S.flipped = false; S.page = 'cards';
+  save(); render(); window.scrollTo(0, 0);
+});
+
+applyTheme(); save(); render();
+</script>
+</body>
+</html>
